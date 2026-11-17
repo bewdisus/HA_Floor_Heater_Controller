@@ -1,0 +1,72 @@
+# Board: Wemos D1 Mini (ESP8266) (Wemos)
+# Definition: definitions/boards/d1_mini/manifest.yaml
+
+esphome:
+  name: esp-smart-heater
+  friendly_name: ESP Smart Heater
+
+esp8266:
+  board: d1_mini
+
+logger:
+
+api:
+  encryption:
+    key: "R0jbpGPAJtGqk7d14NiJzb36UqA7BVkPaWRt77VWNSk="
+
+ota:
+  - platform: esphome
+    encryption:
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: ESP Smart Heate Fallback Hotspot
+    password: "QWkEh0RiTSbV"
+
+captive_portal:
+
+sensor:
+  - platform: adc
+    name: NTC Voltage
+    id: sensor_adc_1
+    pin: GPIO17
+    update_interval: 5s
+    accuracy_decimals: 3
+    filters:
+      - multiply: 3.11
+    samples: 10
+  - platform: resistance
+    name: NTC Resistance
+    id: sensor_resistance_1
+    configuration: DOWNSTREAM
+    resistor: 47kΩ
+    sensor: sensor_adc_1
+  - platform: ntc
+    id: sensor_ntc_1
+    name: Floor Temperature
+    sensor: sensor_resistance_1
+    calibration:
+      b_constant: 3930
+      reference_temperature: 25°C
+      reference_resistance: 9.5kOhm
+    on_value_range:
+      - above: 30
+        then:
+          - switch.turn_off: switch_gpio_1
+      - below: 20
+        then:
+          - switch.turn_on: switch_gpio_1
+
+switch:
+  - platform: gpio
+    name: Pump relay
+    id: switch_gpio_1
+    pin:
+      number: GPIO14
+      mode:
+        output: true
+      inverted: true
+
+    restore_mode: RESTORE_DEFAULT_OFF
