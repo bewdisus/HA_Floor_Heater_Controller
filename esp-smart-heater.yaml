@@ -18,6 +18,9 @@ esphome:
 
 esp8266:
   board: d1_mini
+  # Без этого флага preference-значения (режим, уставки) хранятся в RTC-памяти
+  # и теряются при снятии питания. Нужен для ТЗ §9 и приёмочного п.12.
+  restore_from_flash: true
 
 logger:
   level: INFO
@@ -25,6 +28,8 @@ logger:
 api:
   encryption:
     key: "R0jbpGPAJtGqk7d14NiJzb36UqA7BVkPaWRt77VWNSk="
+  # Не перезагружать контроллер, если HA недоступен дольше 15 минут (ТЗ §13).
+  reboot_timeout: 0s
 
 ota:
   - platform: esphome
@@ -33,6 +38,8 @@ ota:
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
+  # При потере Wi-Fi контроллер продолжает автономную работу и не перезагружается.
+  reboot_timeout: 0s
   ap:
     ssid: ESP Smart Heate Fallback Hotspot
     password: "QWkEh0RiTSbV"
@@ -215,23 +222,32 @@ button:
             ESP_LOGI("control", "Overheat reset ignored: no active alarm");
             return;
           }
-          if (!id(sensor_ntc_1).has_state() || std::isnan(id(sensor_ntc_1).state)) {
-            ESP_LOGW("control", "Overheat reset rejected: sensor invalid");
+          if (id(sensor_fault_active)) {
+            ESP_LOGW("control", "Overheat reset rejected: sensor fault active");
+            return;
+          }
+          if (!id(sensor_ntc_1).has_state() ||
+              std::isnan(id(sensor_ntc_1).state) ||
+              millis() - id(last_measurement_ms) > 30000) {
+            ESP_LOGW("control", "Overheat reset rejected: sensor reading missing or stale");
             return;
           }
           float t = id(sensor_ntc_1).state;
           float v = id(sensor_adc_1).state;
           float r = id(sensor_resistance_1).state;
+          float vmin = id(sensor_valid_min).state;
+          float vmax = id(sensor_valid_max).state;
+          float oh_off = id(overheat_off_temperature).state;
           if (std::isnan(v) || std::isnan(r) ||
+              std::isnan(vmin) || std::isnan(vmax) || std::isnan(oh_off) ||
               v < 0.03f || v > 2.8f ||
               r < 500.0f || r > 300000.0f ||
-              t < id(sensor_valid_min).state || t > id(sensor_valid_max).state) {
+              t < vmin || t > vmax) {
             ESP_LOGW("control", "Overheat reset rejected: sensor reading invalid");
             return;
           }
-          if (t > id(overheat_off_temperature).state) {
-            ESP_LOGW("control", "Overheat reset rejected: %.1f C above %.1f C",
-                     t, id(overheat_off_temperature).state);
+          if (t > oh_off) {
+            ESP_LOGW("control", "Overheat reset rejected: %.1f C above %.1f C", t, oh_off);
             return;
           }
           id(overheat_latched) = false;
@@ -349,6 +365,9 @@ interval:
 
           // Latch overheat immediately, even while the sensor is recovering.
           if (t >= oh_on) {
+            if (!id(overheat_latched)) {
+              ESP_LOGW("control", "Overheat detected: %.1f C >= %.1f C", t, oh_on);
+            }
             id(overheat_latched) = true;
           }
 
@@ -370,6 +389,10 @@ interval:
             id(boot_evaluated) = true;
             if (t >= oh_on || t > oh_off) {
               id(overheat_latched) = true;
+              ESP_LOGW("control", "Overheat latched at boot: %.1f C (OFF threshold %.1f C)",
+                       t, oh_off);
+            } else {
+              ESP_LOGI("control", "Boot temperature check passed: %.1f C", t);
             }
           }
 
