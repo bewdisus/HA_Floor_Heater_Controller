@@ -115,7 +115,9 @@ sensor:
     state_class: measurement
     filters:
       - multiply: 3.11
-    samples: 10
+    # 32 отсчёта вместо 10: шум измерения ~0.27 °C при шаге АЦП 0.17 °C,
+    # усреднение снижает его примерно в 1.7 раза (Анализ_данных_18-19.11.2026.md).
+    samples: 32
   - platform: resistance
     name: NTC Resistance
     id: sensor_resistance_1
@@ -129,6 +131,13 @@ sensor:
     device_class: temperature
     state_class: measurement
     sensor: sensor_resistance_1
+    # Медиана по 5 отсчётам: давит одиночные выбросы, задержка ~10 с при цикле
+    # 46–60 мин. Величина фильтра и полоса гистерезиса связаны правилом H >= 5σ.
+    filters:
+      - median:
+          window_size: 5
+          send_every: 1
+          send_first_at: 1
     calibration:
       b_constant: 3930
       reference_temperature: 25°C
@@ -208,7 +217,9 @@ number:
     id: target_floor_temperature
     optimistic: true
     min_value: 15.0
-    max_value: 40.0
+    # Выше 38.0 °C пол не нагреется: равновесие при непрерывной работе насоса
+    # T_eq = 38.5 °C (Модель_тёплого_пола.md), верхний порог станет недостижим.
+    max_value: 38.0
     step: 0.5
     initial_value: 25.0
     restore_value: true
@@ -221,7 +232,8 @@ number:
     min_value: 0.2
     max_value: 5.0
     step: 0.1
-    initial_value: 1.0
+    # Рабочее значение после фильтра: H = 0.75 при σ <= 0.1 °C даёт запас 7σ.
+    initial_value: 0.75
     restore_value: true
     unit_of_measurement: "°C"
     mode: box
