@@ -100,6 +100,25 @@ def main(t_path, p_path):
     jumps = ((d.abs() > 0.5) & (secs < 120)).sum()
     print("скачков >0.5 °C за <2 мин: %d (%.0f/сутки)" % (jumps, jumps * 24 / hours))
 
+    # --- шум вокруг переключений (для опытов A/B/C) ---
+    print("\n=== ШУМ ОКОЛО ПЕРЕКЛЮЧЕНИЙ (±2 мин) ===")
+    sig, mx = [], []
+    for x in tr["ts"]:
+        w = t[(t.index >= x - pd.Timedelta(minutes=2)) & (t.index <= x + pd.Timedelta(minutes=2))]
+        if len(w) < 5:
+            continue
+        dd = w.diff().dropna()
+        sig.append(dd.std())
+        mx.append(dd.abs().max())
+    if sig:
+        print("sigma вокруг коммутации: медиана %.3f °C | фон по периоду %.3f °C | отношение %.1fx"
+              % (np.median(sig), near.std(), np.median(sig) / near.std()))
+        print("max |dT| рядом: медиана %.2f °C | коммутаций с |dT|>0.5 °C: %.0f%%"
+              % (np.median(mx), 100 * np.mean(np.array(mx) > 0.5)))
+        print("в оценке коммутаций: %d" % len(sig))
+    else:
+        print("недостаточно коммутаций для оценки")
+
     # --- дребезг ---
     print("\n=== ДРЕБЕЗГ ===")
     iv = tr["gap"].dropna()
