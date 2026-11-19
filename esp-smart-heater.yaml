@@ -91,6 +91,19 @@ globals:
     type: std::string
     restore_value: false
     initial_value: '""'
+  # Состояние публикации бинарных датчиков: 2 — ещё не публиковалось.
+  - id: published_fault
+    type: int
+    restore_value: false
+    initial_value: '2'
+  - id: published_overheat
+    type: int
+    restore_value: false
+    initial_value: '2'
+  - id: published_pump
+    type: int
+    restore_value: false
+    initial_value: '2'
 
 sensor:
   - platform: adc
@@ -99,18 +112,22 @@ sensor:
     pin: GPIO17
     update_interval: 5s
     accuracy_decimals: 3
+    state_class: measurement
     filters:
       - multiply: 3.11
     samples: 10
   - platform: resistance
     name: NTC Resistance
     id: sensor_resistance_1
+    state_class: measurement
     configuration: DOWNSTREAM
     resistor: 47kΩ
     sensor: sensor_adc_1
   - platform: ntc
     id: sensor_ntc_1
     name: Floor Temperature
+    device_class: temperature
+    state_class: measurement
     sensor: sensor_resistance_1
     calibration:
       b_constant: 3930
@@ -119,6 +136,47 @@ sensor:
     on_value:
       - lambda: |-
           id(last_measurement_ms) = millis();
+
+  # Расчётные пороги гистерезиса: нужны на графиках этапа 3 и при настройке
+  # адаптивной компенсации на этапе 4. На управление не влияют.
+  - platform: template
+    name: Lower Threshold
+    id: lower_threshold
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    device_class: temperature
+    state_class: measurement
+    update_interval: 5s
+    lambda: |-
+      float t = id(target_floor_temperature).state;
+      float h = id(heating_hysteresis).state;
+      if (std::isnan(t) || std::isnan(h)) return NAN;
+      return t - h / 2.0f;
+  - platform: template
+    name: Upper Threshold
+    id: upper_threshold
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    device_class: temperature
+    state_class: measurement
+    update_interval: 5s
+    lambda: |-
+      float t = id(target_floor_temperature).state;
+      float h = id(heating_hysteresis).state;
+      if (std::isnan(t) || std::isnan(h)) return NAN;
+      return t + h / 2.0f;
+
+  # Служебная диагностика для сбора данных: перезагрузки и качество связи.
+  - platform: uptime
+    name: Uptime
+    id: uptime_sensor
+    entity_category: diagnostic
+    update_interval: 60s
+  - platform: wifi_signal
+    name: Wi-Fi Signal
+    id: wifi_signal_db
+    entity_category: diagnostic
+    update_interval: 60s
 
 switch:
   - platform: gpio
@@ -258,12 +316,15 @@ binary_sensor:
   - platform: template
     name: Sensor Fault
     id: sensor_fault
+    device_class: problem
   - platform: template
     name: Overheat Alarm
     id: overheat_alarm
+    device_class: problem
   - platform: template
     name: Pump Running
     id: pump_running
+    device_class: running
 
 text_sensor:
   - platform: template
@@ -438,9 +499,23 @@ interval:
   - interval: 1s
     then:
       - lambda: |-
-          id(sensor_fault).publish_state(id(ctrl_state_text) == "SENSOR_ERROR");
-          id(overheat_alarm).publish_state(id(overheat_latched));
-          id(pump_running).publish_state(id(switch_gpio_1).state);
+          // Бинарные датчики публикуем только при изменении значения.
+          // published_* == 2 означает "ещё ни разу не публиковали".
+          int fault = (id(ctrl_state_text) == "SENSOR_ERROR") ? 1 : 0;
+          if (fault != id(published_fault)) {
+            id(published_fault) = fault;
+            id(sensor_fault).publish_state(fault == 1);
+          }
+          int overheat = id(overheat_latched) ? 1 : 0;
+          if (overheat != id(published_overheat)) {
+            id(published_overheat) = overheat;
+            id(overheat_alarm).publish_state(overheat == 1);
+          }
+          int pump = id(switch_gpio_1).state ? 1 : 0;
+          if (pump != id(published_pump)) {
+            id(published_pump) = pump;
+            id(pump_running).publish_state(pump == 1);
+          }
           if (id(published_state) != id(ctrl_state_text)) {
             id(published_state) = id(ctrl_state_text);
             id(controller_state).publish_state(id(published_state));
