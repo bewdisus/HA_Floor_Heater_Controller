@@ -131,13 +131,17 @@ sensor:
     device_class: temperature
     state_class: measurement
     sensor: sensor_resistance_1
-    # Медиана по 5 отсчётам: давит одиночные выбросы, задержка ~10 с при цикле
-    # 46–60 мин. Величина фильтра и полоса гистерезиса связаны правилом H >= 5σ.
+    # Медиана по 5 отсчётам: давит одиночные выбросы.
+    # EMA после неё даёт субдискретную точность: медиана сохраняет шаг квантования
+    # АЦП 0.17 °C, и тогда H = 0.75 не отличим от 1.0 (пороги сдвигаются на 0.125 °C,
+    # меньше одного шага). Проверка 19.11: без EMA полоса осталась 1.07 °C.
     filters:
       - median:
           window_size: 5
           send_every: 1
           send_first_at: 1
+      - exponential_moving_average:
+          alpha: 0.2
     calibration:
       b_constant: 3930
       reference_temperature: 25°C
