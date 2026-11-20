@@ -55,6 +55,11 @@ globals:
     type: uint32_t
     restore_value: false
     initial_value: '0'
+  # Отметка последнего значения с выхода фильтров температуры (конвейер датчика).
+  - id: last_ntc_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: '0'
   - id: ctrl_state
     type: int
     restore_value: false
@@ -115,9 +120,14 @@ sensor:
     state_class: measurement
     filters:
       - multiply: 3.11
-    # 32 отсчёта вместо 10: шум измерения ~0.27 °C при шаге АЦП 0.17 °C,
-    # усреднение снижает его примерно в 1.7 раза (Анализ_данных_18-19.11.2026.md).
-    samples: 32
+    # 16 отсчётов: при 32 серия занимает слишком много времени и период
+    # обновления ADC растягивается вдвое. Основное сглаживание делает EMA.
+    samples: 16
+    # Отметка живости измерительного тракта: обновляется на каждом измерении
+    # ADC и не зависит от фильтров температуры.
+    on_value:
+      - lambda: |-
+          id(last_measurement_ms) = millis();
   - platform: resistance
     name: NTC Resistance
     id: sensor_resistance_1
@@ -131,24 +141,27 @@ sensor:
     device_class: temperature
     state_class: measurement
     sensor: sensor_resistance_1
-    # Медиана по 5 отсчётам: давит одиночные выбросы.
-    # EMA после неё даёт субдискретную точность: медиана сохраняет шаг квантования
-    # АЦП 0.17 °C, и тогда H = 0.75 не отличим от 1.0 (пороги сдвигаются на 0.125 °C,
-    # меньше одного шага). Проверка 19.11: без EMA полоса осталась 1.07 °C.
+    # Медиана по 3 отсчётам давит одиночные выбросы, EMA даёт субдискретную
+    # точность: медиана сохраняет шаг квантования АЦП 0.17 °C, из-за чего
+    # H = 0.75 не отличим от 1.0 (пороги сдвигаются на 0.125 °C).
+    # ВАЖНО: у exponential_moving_average send_every по умолчанию 15 — без явного
+    # значения температура публикуется раз в 75 с, и проверка устаревания (30 с)
+    # даёт ложный SENSOR_ERROR. Проверено 20.11.2026.
     filters:
       - median:
-          window_size: 5
+          window_size: 3
           send_every: 1
           send_first_at: 1
       - exponential_moving_average:
           alpha: 0.2
+          send_every: 1
     calibration:
       b_constant: 3930
       reference_temperature: 25°C
       reference_resistance: 9.5kOhm
     on_value:
       - lambda: |-
-          id(last_measurement_ms) = millis();
+          id(last_ntc_ms) = millis();
 
   # Расчётные пороги гистерезиса: нужны на графиках этапа 3 и при настройке
   # адаптивной компенсации на этапе 4. На управление не влияют.
@@ -302,7 +315,7 @@ button:
           }
           if (!id(sensor_ntc_1).has_state() ||
               std::isnan(id(sensor_ntc_1).state) ||
-              millis() - id(last_measurement_ms) > 30000) {
+              millis() - id(last_ntc_ms) > 45000) {
             ESP_LOGW("control", "Overheat reset rejected: sensor reading missing or stale");
             return;
           }
@@ -402,7 +415,13 @@ interval:
           }
 
           bool has_state = id(sensor_ntc_1).has_state();
-          bool fresh = has_state && (now - id(last_measurement_ms) <= 30000);
+          // Два независимых признака живости: ADC (измерение идёт) и сам датчик
+          // температуры (конвейер фильтров выдаёт значения). Раньше проверялся
+          // только выход фильтров — при медленной публикации это давало ложный
+          // SENSOR_ERROR каждые 75 с.
+          bool chain_ok = (now - id(last_measurement_ms)) <= 30000;
+          bool ntc_ok_now = (now - id(last_ntc_ms)) <= 45000;
+          bool fresh = has_state && chain_ok && ntc_ok_now;
 
           float t = NAN;
           float v = NAN;
