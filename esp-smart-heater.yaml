@@ -15,6 +15,10 @@ esphome:
           id(boot_evaluated) = false;
           id(sensor_fault_active) = false;
           id(recovery_start_ms) = 0;
+          id(t_ema) = NAN;
+          id(rate_c) = 0;
+          id(delta_off) = 0;
+          id(delta_on) = 0;
 
 esp8266:
   board: d1_mini
@@ -109,6 +113,25 @@ globals:
     type: int
     restore_value: false
     initial_value: '2'
+  # Адаптивная компенсация порогов (этап 4.3).
+  # t_ema — медленное EMA температуры (600 с): для линейного тренда разность
+  # (T - t_ema) равна v * 10 мин, откуда и берётся скорость.
+  - id: t_ema
+    type: float
+    restore_value: false
+    initial_value: 'NAN'
+  - id: rate_c
+    type: float
+    restore_value: false
+    initial_value: '0'
+  - id: delta_off
+    type: float
+    restore_value: false
+    initial_value: '0'
+  - id: delta_on
+    type: float
+    restore_value: false
+    initial_value: '0'
 
 sensor:
   - platform: adc
@@ -169,7 +192,7 @@ sensor:
     name: Lower Threshold
     id: lower_threshold
     unit_of_measurement: "°C"
-    accuracy_decimals: 1
+    accuracy_decimals: 2
     device_class: temperature
     state_class: measurement
     update_interval: 5s
@@ -177,12 +200,13 @@ sensor:
       float t = id(target_floor_temperature).state;
       float h = id(heating_hysteresis).state;
       if (std::isnan(t) || std::isnan(h)) return NAN;
-      return t - h / 2.0f;
+      // Фактический порог включения с учётом компенсации провала после пуска.
+      return t - h / 2.0f + id(delta_on);
   - platform: template
     name: Upper Threshold
     id: upper_threshold
     unit_of_measurement: "°C"
-    accuracy_decimals: 1
+    accuracy_decimals: 2
     device_class: temperature
     state_class: measurement
     update_interval: 5s
@@ -190,7 +214,34 @@ sensor:
       float t = id(target_floor_temperature).state;
       float h = id(heating_hysteresis).state;
       if (std::isnan(t) || std::isnan(h)) return NAN;
-      return t + h / 2.0f;
+      // Фактический порог отключения с учётом компенсации перелёта.
+      return t + h / 2.0f - id(delta_off);
+
+  # Диагностика адаптивной части (ТЗ §7.4): скорость, компенсации.
+  - platform: template
+    name: Heating Rate
+    id: heating_rate
+    unit_of_measurement: "°C/мин"
+    accuracy_decimals: 3
+    state_class: measurement
+    update_interval: 5s
+    lambda: return id(rate_c);
+  - platform: template
+    name: Off Compensation
+    id: off_compensation
+    unit_of_measurement: "°C"
+    accuracy_decimals: 2
+    state_class: measurement
+    update_interval: 5s
+    lambda: return id(delta_off);
+  - platform: template
+    name: On Compensation
+    id: on_compensation
+    unit_of_measurement: "°C"
+    accuracy_decimals: 2
+    state_class: measurement
+    update_interval: 5s
+    lambda: return id(delta_on);
 
   # Служебная диагностика для сбора данных: перезагрузки и качество связи.
   - platform: uptime
@@ -459,6 +510,33 @@ interval:
             return;
           }
 
+          // --- Адаптивная компенсация (этап 4.3, ТЗ §7.4) ---
+          // Для линейного тренда EMA с постоянной 600 с отстаёт на v*600 c,
+          // поэтому v = (T - EMA) / 10 минут. Шум даёт ±0.003 °C/мин — мало по
+          // сравнению с рабочими 0.02–0.05 °C/мин.
+          if (std::isnan(id(t_ema))) {
+            id(t_ema) = t;
+          } else {
+            id(t_ema) += (t - id(t_ema)) * (1.0f / 600.0f);
+          }
+          id(rate_c) = (t - id(t_ema)) / 10.0f;
+
+          // Перелёт после останова: +0.48 °C при 0.027 °C/мин -> tau = 18 мин.
+          // Провал после пуска: -0.45 °C при 0.014 °C/мин -> tau = 30 мин.
+          // Предел каждой компенсации: эффективная полоса не должна сужаться
+          // ниже 0.25 °C. Проверять сумму в один момент нельзя: в фазе нагрева
+          // d_on = 0, в фазе остывания d_off = 0, и пороги могли бы «сойтись»
+          // между фазами. Поэтому ограничиваем каждую величину до (H - 0.25)/2.
+          float cap = (hyst - 0.25f) / 2.0f;
+          if (cap > 0.5f) cap = 0.5f;
+          if (cap < 0.0f) cap = 0.0f;
+          float d_off = id(rate_c) > 0.0f ? id(rate_c) * 18.0f : 0.0f;
+          if (d_off > cap) d_off = cap;
+          float d_on = id(rate_c) < 0.0f ? (-id(rate_c)) * 30.0f : 0.0f;
+          if (d_on > cap) d_on = cap;
+          id(delta_off) = d_off;
+          id(delta_on) = d_on;
+
           // Latch overheat immediately, even while the sensor is recovering.
           if (t >= oh_on) {
             if (!id(overheat_latched)) {
@@ -515,8 +593,8 @@ interval:
             return;
           }
 
-          float t_on = target - hyst / 2.0f;
-          float t_off = target + hyst / 2.0f;
+          float t_on = target - hyst / 2.0f + id(delta_on);
+          float t_off = target + hyst / 2.0f - id(delta_off);
 
           if (t <= t_on) {
             set_relay(true);
